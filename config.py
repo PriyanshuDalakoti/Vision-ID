@@ -5,8 +5,11 @@ import os
 # To switch between them, just change this flag
 USE_MONGODB = os.environ.get('USE_MONGODB', 'False').lower() in ('true', '1', 't')
 
-# PostgreSQL database URL from environment variables
-POSTGRES_URL = os.environ.get("DATABASE_URL")
+# PostgreSQL database URL from environment variables with connection pooling
+POSTGRES_URL = os.environ.get("DATABASE_URL", "")
+if POSTGRES_URL:
+    # Replace the standard URL with the pooled URL
+    POSTGRES_URL = POSTGRES_URL.replace('.us-west-2', '-pooler.us-west-2')
 
 # MongoDB configuration
 MONGODB_HOST = os.environ.get('MONGODB_HOST', 'localhost')
