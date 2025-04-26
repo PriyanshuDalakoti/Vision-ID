@@ -1,6 +1,3 @@
-/**
- * app.js - Main application logic for VisionID
- */
 
 document.addEventListener('DOMContentLoaded', function() {
     // DOM Elements
@@ -18,7 +15,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const usernameError = document.getElementById('username-error');
     const usernameErrorMessage = document.getElementById('username-error-message');
     
-    // Event Listeners
+   
     authenticateBtn.addEventListener('click', authenticateUser);
     resetSuccessBtn.addEventListener('click', resetApplication);
     resetFailureBtn.addEventListener('click', resetApplication);
