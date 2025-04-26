@@ -3,7 +3,7 @@ import os
 # Database configuration
 # We support both PostgreSQL and MongoDB
 # To switch between them, just change this flag
-USE_MONGODB = os.environ.get('USE_MONGODB', 'False').lower() in ('true', '1', 't')
+USE_MONGODB = os.environ.get('USE_MONGODB', 'True').lower() in ('true', '1', 't')
 
 # PostgreSQL database URL from environment variables with connection pooling
 POSTGRES_URL = os.environ.get("DATABASE_URL", "")

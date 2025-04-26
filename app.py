@@ -15,6 +15,11 @@ import config
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+# Create the app
+app = Flask(__name__)
+app.secret_key = config.SECRET_KEY
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)  # needed for url_for to generate with https
+
 # Database setup
 if config.USE_MONGODB:
     # MongoDB will be used (import and setup is in mongo_models.py)
@@ -25,24 +30,16 @@ if config.USE_MONGODB:
     class Base(DeclarativeBase):
         pass
     db = SQLAlchemy(model_class=Base)
+    # Set a dummy SQLite database URI for SQLAlchemy when using MongoDB
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///dummy.db"
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    db.init_app(app)
 else:
     # PostgreSQL will be used with SQLAlchemy
     from flask_sqlalchemy import SQLAlchemy
     class Base(DeclarativeBase):
         pass
     db = SQLAlchemy(model_class=Base)
-
-# Create the login manager
-login_manager = LoginManager()
-
-# Create the app
-app = Flask(__name__)
-app.secret_key = config.SECRET_KEY
-app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)  # needed for url_for to generate with https
-
-# Configure the database
-if not config.USE_MONGODB:
-    # SQLAlchemy configuration for PostgreSQL
     app.config["SQLALCHEMY_DATABASE_URI"] = config.POSTGRES_URL
     app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
         "pool_size": 5,
@@ -59,18 +56,10 @@ if not config.USE_MONGODB:
         }
     }
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-
-    # Print database URL for debugging (without credentials)
-    db_url = app.config["SQLALCHEMY_DATABASE_URI"]
-    logger.info(f"Using PostgreSQL database: {db_url.split('@')[-1] if '@' in db_url else db_url}")
-
-    # Initialize SQLAlchemy
     db.init_app(app)
-else:
-    # MongoDB is used
-    logger.info(f"Using MongoDB database: {config.MONGODB_URI}")
 
-# Initialize login manager
+# Create the login manager
+login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
@@ -80,6 +69,7 @@ def load_user(user_id):
     if config.USE_MONGODB:
         # Handle MongoDB users
         from mongo_models import MongoUser, MongoAdmin
+        from bson import ObjectId
 
         if session.get('user_type') == 'admin':
             # Load admin from MongoDB
@@ -100,20 +90,25 @@ def load_user(user_id):
             from models import User
             return User.query.get(int(user_id))
 
+# Initialize database and create default admin
 with app.app_context():
-    # Import models to ensure tables are created
-    import models
-    db.create_all()
+    if not config.USE_MONGODB:
+        # Import models to ensure tables are created
+        import models
+        db.create_all()
 
-    # Create default admin account if it doesn't exist
-    from models import Admin
-    admin = Admin.query.filter_by(username="admin").first()
-    if not admin:
-        admin = Admin(username="admin", email="admin@visionid.com")
-        admin.set_password("adminpass123")
-        db.session.add(admin)
-        db.session.commit()
-        logger.info("Created default admin account")
+        # Create default admin account if it doesn't exist
+        from models import Admin
+        admin = Admin.query.filter_by(username="admin").first()
+        if not admin:
+            admin = Admin(username="admin", email="admin@visionid.com")
+            admin.set_password("adminpass123")
+            db.session.add(admin)
+            db.session.commit()
+            logger.info("Created default admin account")
+    else:
+        # Create default admin for MongoDB
+        create_default_admin()
 
 @app.route('/')
 def landing():
@@ -128,7 +123,10 @@ def index():
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     """Register a new user."""
-    from models import User
+    if config.USE_MONGODB:
+        from mongo_models import MongoUser
+    else:
+        from models import User
 
     if request.method == 'POST':
         username = request.form.get('username')
@@ -140,34 +138,49 @@ def register():
             return render_template('register.html', error='All fields are required')
 
         # Check if user already exists
-        existing_user = User.query.filter_by(username=username).first()
+        if config.USE_MONGODB:
+            existing_user = MongoUser.find_by_username(username)
+            existing_email = MongoUser.find_by_email(email)
+        else:
+            existing_user = User.query.filter_by(username=username).first()
+            existing_email = User.query.filter_by(email=email).first()
+
         if existing_user:
             return render_template('register.html', error='Username already exists')
 
-        existing_email = User.query.filter_by(email=email).first()
         if existing_email:
             return render_template('register.html', error='Email already registered')
 
         # Create new user
-        new_user = User(username=username, email=email)
-        new_user.set_password(password)
-
-        try:
-            db.session.add(new_user)
-            db.session.commit()
+        if config.USE_MONGODB:
+            new_user = MongoUser(username=username, email=email)
+            new_user.set_password(password)
+            new_user.save()
             login_user(new_user)
             return redirect(url_for('profile'))
-        except Exception as e:
-            db.session.rollback()
-            logger.error(f"Registration error: {str(e)}")
-            return render_template('register.html', error='An error occurred. Please try again.')
+        else:
+            new_user = User(username=username, email=email)
+            new_user.set_password(password)
+
+            try:
+                db.session.add(new_user)
+                db.session.commit()
+                login_user(new_user)
+                return redirect(url_for('profile'))
+            except Exception as e:
+                db.session.rollback()
+                logger.error(f"Registration error: {str(e)}")
+                return render_template('register.html', error='An error occurred. Please try again.')
 
     return render_template('register.html')
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     """Login a user."""
-    from models import User
+    if config.USE_MONGODB:
+        from mongo_models import MongoUser
+    else:
+        from models import User
 
     if current_user.is_authenticated:
         return redirect(url_for('profile'))
@@ -183,26 +196,45 @@ def login():
         logger.debug(f"Login attempt for username: {username}")
 
         # Look up user by username
-        user = User.query.filter_by(username=username).first()
+        if config.USE_MONGODB:
+            user_dict = MongoUser.find_by_username(username)
+            if user_dict:
+                user = MongoUser(**user_dict)
+                logger.debug(f"User found with ID: {user._id}")
+                if user.check_password(password):
+                    login_user(user)
+                    # Update last login time
+                    user.last_login = datetime.datetime.utcnow()
+                    user.save()
 
-        # If user found, check password
-        if user:
-            logger.debug(f"User found with ID: {user.id}")
-            if user.check_password(password):
-                login_user(user)
-                # Update last login time
-                user.last_login = datetime.datetime.utcnow()
-                db.session.commit()
-
-                # Redirect to next page or profile
-                next_page = request.args.get('next')
-                return redirect(next_page if next_page else url_for('profile'))
+                    # Redirect to next page or profile
+                    next_page = request.args.get('next')
+                    return redirect(next_page if next_page else url_for('profile'))
+                else:
+                    logger.debug("Password check failed")
+                    return render_template('login.html', error='Invalid password')
             else:
-                logger.debug("Password check failed")
-                return render_template('login.html', error='Invalid password')
+                logger.debug("User not found")
+                return render_template('login.html', error='Username not found')
         else:
-            logger.debug("User not found")
-            return render_template('login.html', error='Username not found')
+            user = User.query.filter_by(username=username).first()
+            if user:
+                logger.debug(f"User found with ID: {user.id}")
+                if user.check_password(password):
+                    login_user(user)
+                    # Update last login time
+                    user.last_login = datetime.datetime.utcnow()
+                    db.session.commit()
+
+                    # Redirect to next page or profile
+                    next_page = request.args.get('next')
+                    return redirect(next_page if next_page else url_for('profile'))
+                else:
+                    logger.debug("Password check failed")
+                    return render_template('login.html', error='Invalid password')
+            else:
+                logger.debug("User not found")
+                return render_template('login.html', error='Username not found')
 
     return render_template('login.html')
 
@@ -227,7 +259,11 @@ def profile():
 @app.route('/api/authenticate', methods=['POST'])
 def authenticate():
     """API endpoint to authenticate a face."""
-    from models import User, AuthenticationLog, FaceRecord
+    if config.USE_MONGODB:
+        from mongo_models import MongoUser, MongoAuthenticationLog, MongoFaceRecord
+        from bson import ObjectId
+    else:
+        from models import User, AuthenticationLog, FaceRecord
 
     try:
         # Get the base64 image from the request
@@ -242,6 +278,8 @@ def authenticate():
 
         # Get username if provided (for specific user authentication)
         username = data.get('username')
+        if not username:
+            return jsonify({'status': 'failure', 'message': 'Username is required for authentication'}), 400
 
         # Decode the base64 image
         image_bytes = base64.b64decode(image_data)
@@ -261,8 +299,29 @@ def authenticate():
         confidence_score = 0.0
         user_id = None
 
-        # If a username is provided, attempt to authenticate against that user's face records
-        if username:
+        # Look up user by username
+        if config.USE_MONGODB:
+            user_dict = MongoUser.find_by_username(username)
+            if user_dict:
+                user = MongoUser(**user_dict)
+                user_id = str(user._id)
+                face_records = MongoFaceRecord.find_by_user_id(user_id)
+
+                if face_records:
+                    # Get the first face record for this user to use as reference
+                    face_record = MongoFaceRecord(**face_records[0])
+                    stored_face_data = face_record.embedding
+
+                    # Compare the detected face with the stored face data
+                    is_authenticated = bool(verify_face(face, stored_face_data))  # Convert numpy.bool_ to Python bool
+                    confidence_score = 0.95 if is_authenticated else 0.3
+                else:
+                    logger.info(f"User {username} has no face records")
+                    is_authenticated = False
+                    confidence_score = 0.0
+            else:
+                logger.info(f"Username {username} not found")
+        else:
             user = User.query.filter_by(username=username).first()
             if user:
                 user_id = user.id
@@ -273,7 +332,7 @@ def authenticate():
                     stored_face_data = face_records[0].embedding
 
                     # Compare the detected face with the stored face data
-                    is_authenticated = verify_face(face, stored_face_data)
+                    is_authenticated = bool(verify_face(face, stored_face_data))  # Convert numpy.bool_ to Python bool
                     confidence_score = 0.95 if is_authenticated else 0.3
                 else:
                     logger.info(f"User {username} has no face records")
@@ -281,33 +340,47 @@ def authenticate():
                     confidence_score = 0.0
             else:
                 logger.info(f"Username {username} not found")
-        else:
-            # Without a username, authentication should fail
-            # For security reasons, we require a username for face authentication
-            logger.warning("Face authentication attempted without username")
-            is_authenticated = False  # Always fail without username
-            confidence_score = 0.0
 
         # If authenticated and we have a user_id, log them in
         if is_authenticated and user_id:
-            user = User.query.get(user_id)
-            if user:
-                login_user(user)
+            if config.USE_MONGODB:
+                user_dict = MongoUser.get_by_id(ObjectId(user_id))
+                if user_dict:
+                    user = MongoUser(**user_dict)
+                    login_user(user)
 
-                # Update last login time
-                user.last_login = datetime.datetime.utcnow()
-                db.session.commit()
+                    # Update last login time
+                    user.last_login = datetime.datetime.utcnow()
+                    user.save()
+            else:
+                user = User.query.get(user_id)
+                if user:
+                    login_user(user)
+
+                    # Update last login time
+                    user.last_login = datetime.datetime.utcnow()
+                    db.session.commit()
 
         # Log the authentication attempt
-        log_entry = AuthenticationLog(
-            user_id=user_id,
-            success=is_authenticated,
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None,
-            confidence_score=confidence_score
-        )
-        db.session.add(log_entry)
-        db.session.commit()
+        if config.USE_MONGODB:
+            log_entry = MongoAuthenticationLog(
+                user_id=user_id,
+                success=bool(is_authenticated),  # Convert numpy.bool_ to Python bool
+                ip_address=request.remote_addr,
+                user_agent=request.user_agent.string if request.user_agent else None,
+                confidence_score=float(confidence_score)  # Convert numpy.float to Python float
+            )
+            log_entry.save()
+        else:
+            log_entry = AuthenticationLog(
+                user_id=user_id,
+                success=bool(is_authenticated),  # Convert numpy.bool_ to Python bool
+                ip_address=request.remote_addr,
+                user_agent=request.user_agent.string if request.user_agent else None,
+                confidence_score=float(confidence_score)  # Convert numpy.float to Python float
+            )
+            db.session.add(log_entry)
+            db.session.commit()
 
         # Save the authentication attempt image for security review
         if face is not None:
@@ -343,6 +416,8 @@ def authenticate():
             })
 
     except Exception as e:
+        if not config.USE_MONGODB:
+            db.session.rollback()
         logger.error(f"Authentication error: {str(e)}")
         return jsonify({
             'status': 'failure',
@@ -353,7 +428,10 @@ def authenticate():
 @login_required
 def enroll_face():
     """API endpoint to enroll a user's face."""
-    from models import FaceRecord
+    if config.USE_MONGODB:
+        from mongo_models import MongoFaceRecord
+    else:
+        from models import FaceRecord
     import pickle
     import uuid
     import os
@@ -404,24 +482,34 @@ def enroll_face():
             # Continue even if file saving fails
 
         # Create a new face record for the current user
-        face_record = FaceRecord(
-            user_id=current_user.id,
-            embedding=face_bytes,
-            confidence_score=1.0  # Perfect match for enrollment
-        )
-
-        db.session.add(face_record)
-        db.session.commit()
+        if config.USE_MONGODB:
+            face_record = MongoFaceRecord(
+                user_id=str(current_user._id),
+                embedding=face_bytes,
+                confidence_score=1.0  # Perfect match for enrollment
+            )
+            face_record.save()
+            record_id = str(face_record._id)
+        else:
+            face_record = FaceRecord(
+                user_id=current_user.id,
+                embedding=face_bytes,
+                confidence_score=1.0  # Perfect match for enrollment
+            )
+            db.session.add(face_record)
+            db.session.commit()
+            record_id = face_record.id
 
         return jsonify({
             'status': 'success',
             'message': 'Face enrolled successfully',
-            'record_id': face_record.id,
+            'record_id': record_id,
             'image_path': face_path
         })
 
     except Exception as e:
-        db.session.rollback()
+        if not config.USE_MONGODB:
+            db.session.rollback()
         logger.error(f"Face enrollment error: {str(e)}")
         return jsonify({
             'status': 'failure',

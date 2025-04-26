@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import logging
+from sklearn.metrics.pairwise import cosine_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,68 @@ def detect_face(image):
         logger.error(f"Error in face detection: {str(e)}")
         return None
 
+def extract_face_features(face_image):
+    """
+    Extract features from a face image.
+    In a real system, this would use a deep learning model to extract face embeddings.
+    For this demo, we'll use a simplified feature extraction.
+    
+    Args:
+        face_image: The face image to extract features from
+        
+    Returns:
+        features: A feature vector representing the face
+    """
+    try:
+        # Resize to a standard size
+        face_image = cv2.resize(face_image, (128, 128))
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
+        
+        # Apply histogram equalization
+        equalized = cv2.equalizeHist(gray)
+        
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(equalized, (5, 5), 0)
+        
+        # Apply Sobel edge detection
+        sobelx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
+        
+        # Combine edge features
+        edge_features = np.sqrt(sobelx**2 + sobely**2)
+        
+        # Apply Local Binary Pattern (LBP) for texture features
+        radius = 3
+        n_points = 24
+        lbp = np.zeros_like(blurred)
+        for i in range(radius, blurred.shape[0] - radius):
+            for j in range(radius, blurred.shape[1] - radius):
+                center = blurred[i, j]
+                pattern = 0
+                for k in range(n_points):
+                    angle = 2 * np.pi * k / n_points
+                    x = i + int(radius * np.cos(angle))
+                    y = j + int(radius * np.sin(angle))
+                    pattern |= (blurred[x, y] > center) << k
+                lbp[i, j] = pattern
+        
+        # Combine all features
+        features = np.concatenate([
+            edge_features.flatten(),
+            lbp.flatten(),
+            blurred.flatten()
+        ])
+        
+        # Normalize the features
+        features = features / np.linalg.norm(features)
+        
+        return features
+    except Exception as e:
+        logger.error(f"Error extracting face features: {str(e)}")
+        return None
+
 def verify_face(face_image, stored_face_data=None):
     """
     Verify if the face belongs to an authorized user.
@@ -72,23 +135,47 @@ def verify_face(face_image, stored_face_data=None):
             logger.warning(f"Face too small for verification: {width}x{height}")
             return False
         
-        # If we have stored face data, we would compare the new face to the stored data
-        # In a production system, this would use face recognition embeddings
+        # Extract features from the current face
+        current_features = extract_face_features(face_image)
+        if current_features is None:
+            return False
         
-        # For enhanced security in this demo, we'll only authenticate users with
-        # proper username verification (handled in app.py authenticate route)
-        # This will prevent random faces from authenticating without correct username
+        # If we have stored face data, compare the features
+        if stored_face_data is not None:
+            try:
+                # Convert stored face data to numpy array if it's bytes
+                if isinstance(stored_face_data, bytes):
+                    stored_face = cv2.imdecode(np.frombuffer(stored_face_data, np.uint8), cv2.IMREAD_COLOR)
+                    stored_features = extract_face_features(stored_face)
+                else:
+                    stored_features = stored_face_data
+                
+                if stored_features is None:
+                    return False
+                
+                # Calculate similarity between current and stored features
+                similarity = cosine_similarity([current_features], [stored_features])[0][0]
+                
+                # Set a balanced threshold for face matching
+                # This threshold is more lenient but still secure
+                threshold = 0.75
+                
+                # Log the similarity score for debugging
+                logger.debug(f"Face similarity score: {similarity}")
+                
+                # Additional checks for very low similarity scores
+                if similarity < 0.5:
+                    logger.warning(f"Very low similarity score: {similarity}")
+                    return False
+                
+                return similarity >= threshold
+                
+            except Exception as e:
+                logger.error(f"Error comparing face features: {str(e)}")
+                return False
         
-        # Instead of always returning True as before, we'll return False 50% of the time
-        # for users without face records, making random authentication less likely
-        if stored_face_data is None:
-            import random
-            # Higher level of scrutiny for faces without records
-            return random.random() > 0.5
-        
-        # For users with stored face records, we'll return True (simulating successful authentication)
-        # In a real system, this would perform actual feature matching with the stored face
-        return True
+        # If no stored face data, authentication should fail
+        return False
         
     except Exception as e:
         logger.error(f"Error in face verification: {str(e)}")

@@ -1,4 +1,3 @@
-
 document.addEventListener('DOMContentLoaded', function() {
     // DOM Elements
     const authenticateBtn = document.getElementById('authenticate-button');
@@ -15,6 +14,14 @@ document.addEventListener('DOMContentLoaded', function() {
     const usernameError = document.getElementById('username-error');
     const usernameErrorMessage = document.getElementById('username-error-message');
     
+    // Add event listener for username field
+    if (usernameField) {
+        usernameField.addEventListener('input', function() {
+            if (this.value.trim() !== '') {
+                usernameError.classList.add('d-none');
+            }
+        });
+    }
    
     authenticateBtn.addEventListener('click', authenticateUser);
     resetSuccessBtn.addEventListener('click', resetApplication);
@@ -39,6 +46,15 @@ document.addEventListener('DOMContentLoaded', function() {
      */
     async function authenticateUser() {
         try {
+            // Validate username first
+            if (!usernameField || usernameField.value.trim() === '') {
+                showError('Username is required for authentication. Please enter your username and try again.');
+                usernameError.classList.remove('d-none');
+                usernameErrorMessage.textContent = 'Username is required for authentication';
+                usernameField.focus();
+                return;
+            }
+
             // Get captured image
             const imageBase64 = window.webcamHandler.getImageBase64();
             
@@ -50,12 +66,6 @@ document.addEventListener('DOMContentLoaded', function() {
             // Show loading indicator
             authenticateBtn.classList.add('d-none');
             loadingIndicator.classList.remove('d-none');
-            
-            // Validate username (required)
-            if (!usernameField || usernameField.value.trim() === '') {
-                showError('Username is required for authentication. Please enter your username and try again.');
-                return;
-            }
             
             // Prepare authentication data
             const authData = { 
